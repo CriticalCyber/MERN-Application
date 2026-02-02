@@ -1,186 +1,121 @@
 /**
- * Production-ready Express Server with MongoDB Atlas Connection
- * Handles environment configuration, database connection, and graceful shutdown
+ * Production-ready Express Server
+ * ShubhValueCart Backend
  */
 
-require('dotenv').config({ path: '../.env' });
+require('dotenv').config(); // ✅ ALWAYS FIRST
 
-const express = require('express');
+const path = require('path');
 const http = require('http');
-const connectDatabase = require('./config/database');
+const express = require('express');
+const compression = require('compression');
 
-// Import utilities
-const memoryManager = require('./utils/memoryManager');
+const app = require('./backend/app');
+const connectDatabase = require('./backend/config/database');
 
-// Centralized port configuration with fallback
-const PORT = parseInt(process.env.PORT, 10) || 4001;
+// Utilities
+const memoryManager = require('./backend/utils/memoryManager');
+const seedNotificationTemplates = require('./backend/seed/notificationTemplates');
+
+// Environment
+const PORT = Number(process.env.PORT) || 5000;
 const HOST = process.env.HOST || '0.0.0.0';
+const NODE_ENV = process.env.NODE_ENV || 'production';
 
-// Initialize Express app
-const app = express();
-
-// Create HTTP server
-const server = http.createServer(app);
-
-// Set appropriate timeouts for production
-server.setTimeout(10 * 60 * 1000); // 10 minutes
-server.keepAliveTimeout = 65000; // Keep-alive timeout
-server.headersTimeout = 66000; // Headers timeout
-
-// Global error handler for uncaught exceptions
+/* ──────────────────────
+   GLOBAL ERROR HANDLERS
+────────────────────── */
 process.on('uncaughtException', (err) => {
-    console.error(`❌ Uncaught Exception: ${err.message}`);
-    console.error(`Stack trace: ${err.stack}`);
+    console.error('❌ Uncaught Exception:', err.message);
+    console.error(err.stack);
     process.exit(1);
 });
 
-// Global promise rejection handler
 process.on('unhandledRejection', (err) => {
-    console.error(`❌ Unhandled Promise Rejection: ${err.message}`);
-    
-    // Close server gracefully
-    server.close(() => {
-        process.exit(1);
-    });
-    
-    // Force exit if server doesn't close within 10 seconds
-    setTimeout(() => {
-        console.error('Server failed to close, forcing exit');
-        process.exit(1);
-    }, 10000);
+    console.error('❌ Unhandled Promise Rejection:', err.message);
+    server.close(() => process.exit(1));
 });
 
-// Initialize application components
-async function initializeApp() {
+/* ──────────────────────
+   EXPRESS MIDDLEWARE
+────────────────────── */
+app.use(compression());
+
+// Request / response timeout safety
+app.use((req, res, next) => {
+    req.setTimeout(10 * 60 * 1000);
+    res.setTimeout(10 * 60 * 1000);
+    next();
+});
+
+/* ──────────────────────
+   STATIC FRONTEND (PROD)
+────────────────────── */
+if (NODE_ENV === 'production') {
+    const buildPath = path.join(__dirname, 'frontend', 'build');
+    app.use(express.static(buildPath));
+
+    app.get('*', (req, res) => {
+        res.sendFile(path.join(buildPath, 'index.html'));
+    });
+} else {
+    app.get('/', (req, res) => {
+        res.send('Server is Running! 🚀');
+    });
+
+    app.get('/health', (req, res) => {
+        res.status(200).json({
+            success: true,
+            environment: NODE_ENV,
+            timestamp: new Date().toISOString(),
+        });
+    });
+}
+
+/* ──────────────────────
+   SERVER INITIALIZATION
+────────────────────── */
+const server = http.createServer(app);
+
+// Production timeouts
+server.setTimeout(10 * 60 * 1000);
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+
+/* ──────────────────────
+   BOOTSTRAP FUNCTION
+────────────────────── */
+async function startServer() {
     try {
         console.log('🚀 Starting application initialization...');
-        
+        console.log('🔌 Connecting to MongoDB Atlas...');
+
+        await connectDatabase();
+        console.log('✅ MongoDB connected');
+
+        await seedNotificationTemplates();
+
         // Start memory monitoring
         memoryManager.startMonitoring();
-        
-        // Connect to MongoDB Atlas
-        console.log('🔌 Connecting to MongoDB Atlas...');
-        const dbConnection = await connectDatabase();
-        
-        // Configure Express app
-        configureApp(app);
-        
-        // Start HTTP server
-        console.log(`📡 Starting server on ${HOST}:${PORT}...`);
-        server.listen({ host: HOST, port: PORT }, () => {
+
+        server.listen(PORT, HOST, () => {
             console.log(`✅ Server running on http://${HOST}:${PORT}`);
-            console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-            console.log(`📊 Database: Connected to MongoDB Atlas`);
+            console.log(`🌍 Environment: ${NODE_ENV}`);
         });
-        
-        // Handle server errors
+
         server.on('error', (err) => {
             if (err.code === 'EADDRINUSE') {
-                console.error(`❌ Port ${PORT} is already in use. Please free up the port and restart.`);
-                process.exit(1);
-            } else if (err.code === 'EACCES') {
-                console.error(`❌ Permission denied to access port ${PORT}. Try a port > 1024 or run with elevated privileges.`);
-                process.exit(1);
+                console.error(`❌ Port ${PORT} already in use`);
             } else {
                 console.error('❌ Server error:', err);
-                process.exit(1);
             }
+            process.exit(1);
         });
-        
-        // Handle graceful shutdown
-        setupGracefulShutdown(server, dbConnection);
-        
-        return { app, server, dbConnection };
+
     } catch (error) {
-        console.error('❌ Application initialization failed:', error.message);
-        console.error('🔧 Please check your environment variables and MongoDB Atlas connection.');
-        
-        // Exit with error code
+        console.error('❌ Startup failure:', error.message);
         process.exit(1);
     }
 }
 
-// Configure Express application middleware
-function configureApp(app) {
-    // Apply request/response timeouts
-    app.use((req, res, next) => {
-        req.setTimeout(10 * 60 * 1000); // 10 minutes
-        res.setTimeout(10 * 60 * 1000); // 10 minutes
-        next();
-    });
-    
-    // Import and configure the main application routes
-    const mainApp = require('./app');
-    app.use(mainApp);
-    
-    // Health check endpoint
-    app.get('/health', (req, res) => {
-        const healthcheck = {
-            uptime: process.uptime(),
-            message: 'OK',
-            timestamp: new Date().toISOString(),
-            environment: process.env.NODE_ENV,
-            version: process.env.npm_package_version || '1.0.0'
-        };
-        
-        try {
-            res.status(200).json(healthcheck);
-        } catch (error) {
-            console.error('Health check error:', error);
-            healthcheck.message = error;
-            res.status(503).send();
-        }
-    });
-    
-    // 404 handler for undefined routes
-    app.use('*', (req, res) => {
-        res.status(404).json({
-            success: false,
-            message: `Route ${req.originalUrl} not found`
-        });
-    });
-}
-
-// Setup graceful shutdown procedures
-function setupGracefulShutdown(server, dbConnection) {
-    const signals = ['SIGTERM', 'SIGINT', 'SIGUSR2'];
-    
-    signals.forEach(signal => {
-        process.on(signal, async () => {
-            console.log(`\n${signal} signal received. Shutting down gracefully...`);
-            
-            try {
-                // Close server
-                await new Promise((resolve, reject) => {
-                    server.close((err) => {
-                        if (err) {
-                            console.error('Error closing server:', err);
-                            reject(err);
-                        } else {
-                            console.log('✅ HTTP server closed');
-                            resolve();
-                        }
-                    });
-                });
-                
-                // Close database connection
-                if (dbConnection && typeof dbConnection.close === 'function') {
-                    await dbConnection.close();
-                    console.log('✅ MongoDB connection closed');
-                }
-                
-                console.log('✅ Application shut down successfully');
-                process.exit(0);
-            } catch (error) {
-                console.error('Error during graceful shutdown:', error);
-                process.exit(1);
-            }
-        });
-    });
-}
-
-// Start the application
-initializeApp();
-
-// Export for testing purposes
-module.exports = { app, server };
+startServer();
